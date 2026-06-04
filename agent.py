@@ -1,6 +1,9 @@
 import json
 import time
 from kafka import KafkaConsumer, KafkaProducer
+from anthropic import Anthropic
+
+client = Anthropic()
 
 
 def safe_json(v):
@@ -10,27 +13,35 @@ def safe_json(v):
         return None
 
 
-# ---- the "brain" ---------------------------------------------------------
-# Mock LLM: stands in for a real model call. Same inputs/outputs as the real
-# thing, so swapping in Anthropic/OpenAI later is a tiny change.
 def llm_triage(event):
-    temp = event["temp_c"]
-    if temp >= 125:
-        severity = "critical"
-        action = "shutdown_device"
-        reason = f"{temp}C far exceeds safe limit; immediate shutdown advised."
-    elif temp >= 110:
-        severity = "high"
-        action = "alert_operator"
-        reason = f"{temp}C is well above normal; operator should investigate."
-    else:
-        severity = "medium"
-        action = "log_only"
-        reason = f"{temp}C is elevated but not critical; monitor."
-    # simulate model latency so the metrics later look real
-    time.sleep(0.1)
-    return {"severity": severity, "recommended_action": action, "reason": reason}
-# --------------------------------------------------------------------------
+    prompt = f"""You are triaging a sensor anomaly. Reading: {event}
+
+Respond with ONLY a JSON object, no other text, in this exact format:
+{{"severity": "critical|high|medium", "recommended_action": "shutdown_device|alert_operator|log_only", "reason": "one sentence"}}"""
+
+    try:
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text.strip()
+
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        return json.loads(raw)
+
+    except Exception as e:
+        # model failed or returned non-JSON -> escalate instead of crashing
+        return {
+            "severity": "high",
+            "recommended_action": "alert_operator",
+            "reason": f"triage failed, escalating for human review ({type(e).__name__})",
+        }
 
 
 consumer = KafkaConsumer(
@@ -55,8 +66,6 @@ for msg in consumer:
 
     decision = llm_triage(event)
 
-    # THE GOVERNANCE PART: every decision is recorded, in full, before
-    # anything acts on it. Input, output, and timestamp — nothing off the record.
     audit_record = {
         "ts": int(time.time() * 1000),
         "input_event": event,
