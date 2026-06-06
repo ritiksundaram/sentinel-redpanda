@@ -1,0 +1,21 @@
+input:
+  kafka:
+    addresses: ["localhost:9092"]
+    topics: ["telemetry.raw"]
+    consumer_group: "connect-router"
+
+pipeline:
+  processors: []
+
+output:
+  switch:
+    cases:
+      - check: 'this.temp_c != null && this.temp_c > 100'
+        output:
+          kafka:
+            addresses: ["localhost:9092"]
+            topic: "telemetry.anomalies"
+      - output:
+          kafka:
+            addresses: ["localhost:9092"]
+            topic: "telemetry.clean"
